@@ -8,10 +8,11 @@ Module: Function/Four
 """
 # import general python modules
 import os
-import gdal
+import numpy as np
 import pandas as pd
+from netCDF4 import Dataset
 
-def Calculate(Basin, P_Product, ET_Product, Moving_Averaging_Length, Startdate, Enddate, Simulation):
+def Calculate(WA_HOME_folder, Basin, P_Product, ET_Product, LAI_Product, ETref_Product, Runoff_Product, Startdate, Enddate, Simulation):
     """
     This functions is the main framework for calculating sheet 4.
 
@@ -22,220 +23,235 @@ def Calculate(Basin, P_Product, ET_Product, Moving_Averaging_Length, Startdate, 
     P_Product : str
         Name of the rainfall product that will be used
     ET_Product : str
-        Name of the evapotranspiration product that will be used 
+        Name of the evapotranspiration product that will be used
+    LAI_Product : str
+        Name of the LAI product that will be used
+    Runoff_Product : str
+        Name of the Runoff product that will be used
     Moving_Averiging_Length, int
-        Defines the length of the moving average    
+        Defines the length of the moving average
     Startdate : str
-        Contains the start date of the model 'yyyy-mm-dd'    
+        Contains the start date of the model 'yyyy-mm-dd'
     Enddate : str
-        Contains the end date of the model 'yyyy-mm-dd' 
+        Contains the end date of the model 'yyyy-mm-dd'
     Simulation : int
-        Defines the simulation    
-        
-    """ 
+        Defines the simulation
+
+    """
     ######################### Import WA modules ###################################
-    
+
     from wa.General import raster_conversions as RC
     from wa.General import data_conversions as DC
     import wa.Functions.Four as Four
     import wa.Functions.Start as Start
     import wa.Generator.Sheet4 as Generate
-    
+    import wa.Functions.Start.Get_Dictionaries as GD
+
     ######################### Set General Parameters ##############################
 
     # Get environmental variable for the Home folder
-    WA_env_paths = os.environ["WA_HOME"].split(';')
-    Dir_Home = WA_env_paths[0]
-	
+    if WA_HOME_folder == '':
+        WA_env_paths = os.environ["WA_HOME"].split(';')
+        Dir_Home = WA_env_paths[0]
+    else:
+        Dir_Home = WA_HOME_folder
+
     # Create the Basin folder
     Dir_Basin = os.path.join(Dir_Home, Basin)
-    if not os.path.exists(Dir_Basin):
-        os.makedirs(Dir_Basin)	
+    output_dir = os.path.join(Dir_Basin, "Simulations", "Simulation_%d" %Simulation)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
     # Get the boundaries of the basin based on the shapefile of the watershed
     # Boundaries, Shape_file_name_shp = Start.Boundaries.Determine(Basin)
-    Boundaries, Example_dataset = Start.Boundaries.Determine_LU_Based(Basin)
- 
-    #Set Startdate and Enddate for moving average
-    Additional_Months = (Moving_Averaging_Length - 1)/2
-    Startdate_Moving_Average = pd.Timestamp(Startdate) - pd.DateOffset(months = Additional_Months)
-    Enddate_Moving_Average = pd.Timestamp(Enddate) + pd.DateOffset(months = Additional_Months)
-    Startdate_Moving_Average_String = '%d-%02d-%02d' %(Startdate_Moving_Average.year, Startdate_Moving_Average.month, Startdate_Moving_Average.day)
-    Enddate_Moving_Average_String = '%d-%02d-%02d' %(Enddate_Moving_Average.year, Enddate_Moving_Average.month, Enddate_Moving_Average.day)
+    Boundaries, Example_dataset = Start.Boundaries.Determine_LU_Based(Basin, Dir_Home)
 
-    ############################# Download Data ###################################
+    # Find the maximum moving window value
+    ET_Blue_Green_Classes_dict, Moving_Window_Per_Class_dict = GD.get_bluegreen_classes(version = '1.0')
+    Additional_Months_tail = np.max(Moving_Window_Per_Class_dict.values())
 
-    # Download data
-    Data_Path_P = Start.Download_Data.Precipitation(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']], Startdate_Moving_Average_String, Enddate_Moving_Average_String, P_Product, Daily = 'n') 
-    Data_Path_ET = Start.Download_Data.Evapotranspiration(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']], Startdate, Enddate, ET_Product)
-    Data_Path_ETref = Start.Download_Data.ETreference(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']], Startdate_Moving_Average_String, Enddate_Moving_Average_String)
-    Data_Path_GWF = Start.Download_Data.GWF(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']])
+    ############## Cut dates into pieces if it is needed ######################
 
-    Data_Path_P_Monthly = os.path.join(Data_Path_P, 'Monthly')
+    # Check the years that needs to be calculated
+    years = range(int(Startdate.split('-')[0]),int(Enddate.split('-')[0]) + 1)
 
-    ###################### Save Data as netCDF files ##############################
-    
-    #___________________________________Land Use_______________________________
+    for year in years:
 
-    # Get the data of LU and save as nc, This dataset is also used as reference for others
-    LUdest = gdal.Open(Example_dataset)    
-    DataCube_LU = LUdest.GetRasterBand(1).ReadAsArray()
+        # Create .nc file if not exists
+        nc_outname = os.path.join(output_dir, "%d.nc" % year)
+        if not os.path.exists(nc_outname):
+            DC.Create_new_NC_file(nc_outname, Example_dataset, Basin)
 
-    Name_NC_LU = DC.Create_NC_name('LU', Simulation, Dir_Basin, 4)
-    if not os.path.exists(Name_NC_LU):
-        DC.Save_as_NC(Name_NC_LU, DataCube_LU, 'LU', Example_dataset)
+        # Open variables in netcdf
+        fh = Dataset(nc_outname)
+        Variables_NC = [var for var in fh.variables]
+        fh.close()
 
-    LUdest = None
-    del DataCube_LU
+        # Create Start and End date for time chunk
+        Startdate_part = '%d-01-01' %int(year)
+        Enddate_part = '%s-12-31' %int(year)
 
-    #______________________________Precipitation_______________________________
+        if int(year) == int(years[0]):
+            Startdate_Moving_Average = pd.Timestamp(Startdate) - pd.DateOffset(months = Additional_Months_tail)
+            Startdate_Moving_Average_String = Startdate_Moving_Average.strftime('%Y-%m-%d')
+        else:
+            Startdate_Moving_Average_String = Startdate_part
 
-    # Define info for the nc files
-    info = ['monthly','mm', ''.join([Startdate_Moving_Average_String[5:7], Startdate_Moving_Average_String[0:4]]) , ''.join([Enddate_Moving_Average_String[5:7], Enddate_Moving_Average_String[0:4]])]
+        ############################# Download Data ###################################
 
-    # Precipitation data
-    Name_NC_P = DC.Create_NC_name('Prec', Simulation, Dir_Basin, 4, info)
-    if not os.path.exists(Name_NC_P):
-	
-        # Get the data of Precipitation and save as nc
-        DataCube_Prec = RC.Get3Darray_time_series_monthly(Dir_Basin, Data_Path_P_Monthly, Startdate_Moving_Average_String, Enddate_Moving_Average_String, Example_data = Example_dataset)
-        DC.Save_as_NC(Name_NC_P, DataCube_Prec, 'Prec', Example_dataset, Startdate_Moving_Average_String, Enddate_Moving_Average_String, 'monthly', 0.01)
-        del DataCube_Prec
+        # Download data
+        if not "Precipitation" in Variables_NC:
+            Data_Path_P_Monthly = Start.Download_Data.Precipitation(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']], Startdate_part, Enddate_part, P_Product)
 
-  #_______________________Reference Evaporation______________________________
+        if not "Actual_Evapotranspiration" in Variables_NC:
+            Data_Path_ET = Start.Download_Data.Evapotranspiration(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']], Startdate_part, Enddate_part, ET_Product)
 
-    # Reference Evapotranspiration data
-    Name_NC_ETref = DC.Create_NC_name('ETref', Simulation, Dir_Basin, 4, info)
-    if not os.path.exists(Name_NC_ETref):
+        if not "Reference_Evapotranspiration" in Variables_NC:
+            Data_Path_ETref = Start.Download_Data.ETreference(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']], Startdate_Moving_Average_String, Enddate_part, ETref_Product)
 
-        # Get the data of Evaporation and save as nc
-        DataCube_ETref = RC.Get3Darray_time_series_monthly(Dir_Basin, Data_Path_ETref, Startdate_Moving_Average_String, Enddate_Moving_Average_String, Example_data = Example_dataset)
-        DC.Save_as_NC(Name_NC_ETref, DataCube_ETref, 'ETref', Example_dataset, Startdate_Moving_Average_String, Enddate_Moving_Average_String, 'monthly', 0.01)
-        del DataCube_ETref
+        if not "Grey_Water_Footprint" in Variables_NC:
+            Data_Path_GWF = Start.Download_Data.GWF(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']])
 
-    #_______________________________Evaporation________________________________
-    info = ['monthly','mm', ''.join([Startdate[5:7], Startdate[0:4]]) , ''.join([Enddate[5:7], Enddate[0:4]])]
+        if not "Theta_Saturated_Topsoil" in Variables_NC:
+            Data_Path_ThetaSat_topsoil = Start.Download_Data.Soil_Properties(Dir_Basin, [Boundaries['Latmin'],Boundaries['Latmax']],[Boundaries['Lonmin'],Boundaries['Lonmax']], Para = 'ThetaSat_TopSoil')
 
-    # Evapotranspiration data
-    Name_NC_ET = DC.Create_NC_name('ET', Simulation, Dir_Basin, 4, info)
-    if not os.path.exists(Name_NC_ET):
+        ###################### Save Data as netCDF files ##############################
 
-        # Get the data of Evaporation and save as nc
-        DataCube_ET = RC.Get3Darray_time_series_monthly(Dir_Basin, Data_Path_ET, Startdate, Enddate, Example_data = Example_dataset)
-        DC.Save_as_NC(Name_NC_ET, DataCube_ET, 'ET', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        del DataCube_ET
+        #______________________________Precipitation_______________________________
 
-    #_____________________________________GWF__________________________________
+        # 1.) Precipitation data
+        if not "Precipitation" in Variables_NC:
+            # Get the data of Precipitation and save as nc
+            DataCube_Prec = RC.Get3Darray_time_series_monthly(Data_Path_P_Monthly, Startdate_part, Enddate_part, Example_data = Example_dataset)
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_Prec, "Precipitation", "mm/month", 0.01)
+            del DataCube_Prec
 
-    # GWF data
-    Name_NC_GWF = DC.Create_NC_name('GWF_Fraction', Simulation, Dir_Basin, 4)
-    if not os.path.exists(Name_NC_GWF):
+       #_______________________Reference Evaporation______________________________
 
-        # Get the data of GWF, reproject and save as nc
-        GWF_Filepath = os.path.join(Dir_Basin, Data_Path_GWF, "Gray_Water_Footprint_Fraction.tif")
-        dest_GWF = RC.reproject_dataset_example(GWF_Filepath, Example_dataset, method=1)
-        DataCube_GWF = dest_GWF.GetRasterBand(1).ReadAsArray()
-        DC.Save_as_NC(Name_NC_GWF, DataCube_GWF, 'GWF', Example_dataset,Scaling_factor = 0.01)
-        del DataCube_GWF
-        
+        # 2.) Reference Evapotranspiration data
+        if not "Reference_Evapotranspiration" in Variables_NC:
+            # Get the data of Precipitation and save as nc
+            DataCube_ETref = RC.Get3Darray_time_series_monthly(Data_Path_ETref, Startdate_part, Enddate_part, Example_data = Example_dataset)
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_ETref, "Reference_Evapotranspiration", "mm/month", 0.01)
+            del DataCube_ETref
+
+        #_______________________________Evaporation________________________________
+
+        # 3.) Evapotranspiration data
+        if not "Actual_Evapotranspiration" in Variables_NC:
+            # Get the data of Evaporation and save as nc
+            DataCube_ET = RC.Get3Darray_time_series_monthly(Data_Path_ET, Startdate_part, Enddate_part, Example_data = Example_dataset)
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_ET, "Actual_Evapotranspiration", "mm/month", 0.01)
+            del DataCube_ET
+
+        #_____________________________________GWF__________________________________
+
+        # 4.) Grey Water Footprint data
+        if not "Grey_Water_Footprint" in Variables_NC:
+            # Get the data of grey water footprint and save as nc
+            GWF_Filepath = os.path.join(Dir_Basin, Data_Path_GWF, "Gray_Water_Footprint_Fraction.tif")
+            dest_GWF = RC.reproject_dataset_example(GWF_Filepath, Example_dataset, method=1)
+            DataCube_GWF = dest_GWF.GetRasterBand(1).ReadAsArray()
+            DC.Add_NC_Array_Static(nc_outname, DataCube_GWF, "Grey_Water_Footprint", "fraction", 0.0001)
+            del DataCube_GWF
+
     ####################### Calculations Sheet 4 ##############################
 
-    #____________ Evapotranspiration data split in ETblue and ETgreen ____________
+    ############## Cut dates into pieces if it is needed ######################
 
-    Name_NC_ETgreen = DC.Create_NC_name('ETgreen', Simulation, Dir_Basin, 4, info)
-    Name_NC_ETblue = DC.Create_NC_name('ETblue', Simulation, Dir_Basin, 4, info)
-    
-    if not (os.path.exists(Name_NC_ETgreen) or os.path.exists(Name_NC_ETblue)):
+    years = range(int(Startdate.split('-')[0]),int(Enddate.split('-')[0]) + 1)
 
-        # Calculate Blue and Green ET
-        DataCube_ETblue, DataCube_ETgreen = Four.SplitET.Blue_Green(Name_NC_ET, Name_NC_P, Name_NC_ETref, Startdate, Enddate, Additional_Months)
+    for year in years:
 
-        # Save the ETblue and ETgreen data as NetCDF files
-        DC.Save_as_NC(Name_NC_ETblue, DataCube_ETblue, 'ETblue', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        DC.Save_as_NC(Name_NC_ETgreen, DataCube_ETgreen, 'ETgreen', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
+        if len(years) > 1.0:
 
-        del DataCube_ETblue, DataCube_ETgreen
+            if year is years[0]:
+                Startdate_part = Startdate
+                Enddate_part = '%s-12-31' %year
+            if year is years[-1]:
+                Startdate_part = '%s-01-01' %year
+                Enddate_part = Enddate
 
-    #____________ Calculate non-consumend and Total supply maps by using fractions and consumed maps (blue ET) ____________
+        else:
+            Startdate_part = Startdate
+            Enddate_part = Enddate
 
-    Name_NC_Total_Supply = DC.Create_NC_name('TotSup', Simulation, Dir_Basin, 4, info)
-    Name_NC_Non_Consumed = DC.Create_NC_name('NonCon', Simulation, Dir_Basin, 4, info)    
+        #____________ Evapotranspiration data split in ETblue and ETgreen ____________
 
-    if not (os.path.exists(Name_NC_Total_Supply) or os.path.exists(Name_NC_Non_Consumed)):
+        if not ("Blue_Evapotranspiration" in Variables_NC or "Green_Evapotranspiration" in Variables_NC):
 
-        # Do the calculations
-        DataCube_Total_Supply, DataCube_Non_Consumed = Four.Total_Supply.Fraction_Based(Name_NC_ETblue, Name_NC_LU, Startdate, Enddate)
-    
-        # Save the Total Supply and non consumed data as NetCDF files
-        DC.Save_as_NC(Name_NC_Total_Supply, DataCube_Total_Supply, 'TotSup', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        DC.Save_as_NC(Name_NC_Non_Consumed, DataCube_Non_Consumed, 'NonCon', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        del DataCube_Total_Supply, DataCube_Non_Consumed
-    
-    #____________ Apply fractions over total supply to calculate gw and sw supply ____________
+            # Calculate Blue and Green ET
+            DataCube_ETblue, DataCube_ETgreen = Four.SplitET.Blue_Green(Dir_Basin, nc_outname, ETref_Product, P_Product, Startdate, Enddate)
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_ETblue, "Blue_Evapotranspiration", "mm/month", 0.01)
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_ETgreen, "Green_Evapotranspiration", "mm/month", 0.01)
+            del DataCube_ETblue, DataCube_ETgreen
 
-    Name_NC_Total_Supply_SW = DC.Create_NC_name('TotSupSW', Simulation, Dir_Basin, 4, info)
-    Name_NC_Total_Supply_GW = DC.Create_NC_name('TotSupGW', Simulation, Dir_Basin, 4, info)    
+        #____________ Calculate non-consumend and Total supply maps by using fractions and consumed maps (blue ET) ____________
 
-    if not (os.path.exists(Name_NC_Total_Supply_SW) or os.path.exists(Name_NC_Total_Supply_GW)):
+        if not ("Total_Supply" in Variables_NC or "Non_Consumed_Water" in Variables_NC):
 
-        # Do the calculations
-        DataCube_Total_Supply_SW, DataCube_Total_Supply_GW = Four.SplitGW_SW_Supply.Fraction_Based(Name_NC_Total_Supply, Name_NC_LU, Startdate, Enddate)
-    
-        # Save the Total Supply surface water and Total Supply ground water data as NetCDF files
-        DC.Save_as_NC(Name_NC_Total_Supply_SW, DataCube_Total_Supply_SW, 'TotSupSW', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        DC.Save_as_NC(Name_NC_Total_Supply_GW, DataCube_Total_Supply_GW, 'TotSupGW', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        del DataCube_Total_Supply_SW, DataCube_Total_Supply_GW
-    
-    #____________ Apply gray water footprint fractions to calculated non recoverable flow based on the non consumed flow ____________
+            # Do the calculations
+            DataCube_Total_Supply, DataCube_Non_Consumed = Four.Total_Supply.Fraction_Based(nc_outname, Startdate_part, Enddate_part)
 
-    Name_NC_NonRecovableFlow = DC.Create_NC_name('NonRecov', Simulation, Dir_Basin, 4, info)
-    Name_NC_RecovableFlow = DC.Create_NC_name('Recov', Simulation, Dir_Basin, 4, info)    
+            # Save the Total Supply and non consumed data as NetCDF files
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_Total_Supply, "Total_Supply", "mm/month", 0.01)
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_Non_Consumed, "Non_Consumed_Water", "mm/month", 0.01)
+            del DataCube_Total_Supply, DataCube_Non_Consumed
 
-    if not (os.path.exists(Name_NC_NonRecovableFlow) or os.path.exists(Name_NC_RecovableFlow)):
+        #____________ Apply fractions over total supply to calculate gw and sw supply ____________
 
-        # Calculate the non recovable flow and recovable flow by using Grey Water Footprint values
-        DataCube_NonRecovableFlow, Datacube_RecovableFlow = Four.SplitNonConsumed_NonRecov.GWF_Based(Name_NC_Non_Consumed, Name_NC_GWF, Name_NC_LU, Startdate, Enddate)
-    
-        # Get the data of Evaporation and save as nc
-        DC.Save_as_NC(Name_NC_NonRecovableFlow, DataCube_NonRecovableFlow, 'NonRecov', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        DC.Save_as_NC(Name_NC_RecovableFlow, Datacube_RecovableFlow, 'Recov', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        del DataCube_NonRecovableFlow, Datacube_RecovableFlow
-    
-    #____________Apply fractions to calculate the non recovarable SW/GW and recovarable SW/GW ____________
-    
-    # 1. Non recovarable flow
-    Name_NC_NonRecovableFlow_Return_GW = DC.Create_NC_name('NonRecov_Return_GW', Simulation, Dir_Basin, 4, info)
-    Name_NC_NonRecovableFlow_Return_SW = DC.Create_NC_name('NonRecov_Return_SW', Simulation, Dir_Basin, 4, info)    
+        if not ("Total_Supply_Surface_Water" in Variables_NC or "Total_Supply_Ground_Water" in Variables_NC):
 
-    if not (os.path.exists(Name_NC_NonRecovableFlow_Return_GW) or os.path.exists(Name_NC_NonRecovableFlow_Return_SW)):
+            # Do the calculations
+            DataCube_Total_Supply_SW, DataCube_Total_Supply_GW = Four.SplitGW_SW_Supply.Fraction_Based(nc_outname, Startdate_part, Enddate_part)
 
-        # Calculate the non recovable return flow to ground and surface water
-        DataCube_NonRecovableFlow_Return_GW, Datacube_NonRecovableFlow_Return_SW = Four.SplitGW_SW_Return.Fraction_Based(Name_NC_NonRecovableFlow, Name_NC_LU, Startdate, Enddate)
-    
-        # Get the data of Evaporation and save as nc
-        DC.Save_as_NC(Name_NC_NonRecovableFlow_Return_GW, DataCube_NonRecovableFlow_Return_GW, 'NonRecovReturnGW', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        DC.Save_as_NC(Name_NC_NonRecovableFlow_Return_SW, Datacube_NonRecovableFlow_Return_SW, 'NonRecovReturnSW', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        del DataCube_NonRecovableFlow_Return_GW, Datacube_NonRecovableFlow_Return_SW
+            # Save the Total Supply surface water and Total Supply ground water data as NetCDF files
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_Total_Supply_SW, "Total_Supply_Surface_Water", "mm/month", 0.01)
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_Total_Supply_GW, "Total_Supply_Ground_Water", "mm/month", 0.01)
+            del DataCube_Total_Supply_SW, DataCube_Total_Supply_GW
 
-    # 2. Recovarable flow    
-    Name_NC_RecovableFlow_Return_GW = DC.Create_NC_name('Recov_Return_GW', Simulation, Dir_Basin, 4, info)
-    Name_NC_RecovableFlow_Return_SW = DC.Create_NC_name('Recov_Return_SW', Simulation, Dir_Basin, 4, info)    
+        #____________ Apply gray water footprint fractions to calculated non recoverable flow based on the non consumed flow ____________
 
-    if not (os.path.exists(Name_NC_RecovableFlow_Return_GW) or os.path.exists(Name_NC_RecovableFlow_Return_SW)):
 
-        # Calculate the non recovable return flow to ground and surface water
-        DataCube_RecovableFlow_Return_GW, Datacube_RecovableFlow_Return_SW = Four.SplitGW_SW_Return.Fraction_Based(Name_NC_RecovableFlow, Name_NC_LU, Startdate, Enddate)
-    
-        # Get the data of Evaporation and save as nc
-        DC.Save_as_NC(Name_NC_RecovableFlow_Return_GW, DataCube_RecovableFlow_Return_GW, 'NonRecovReturnGW', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        DC.Save_as_NC(Name_NC_RecovableFlow_Return_SW, Datacube_RecovableFlow_Return_SW, 'NonRecovReturnSW', Example_dataset, Startdate, Enddate, 'monthly', 0.01)
-        del DataCube_RecovableFlow_Return_GW, Datacube_RecovableFlow_Return_SW
-    
-    ############################ Create CSV 4 #################################    
+        if not ("Non_Recovable_Flow" in Variables_NC or "Recovable_Flow" in Variables_NC):
 
-    Dir_Basin_CSV, Unit_front = Generate.CSV.Create(Dir_Basin, Simulation, Basin, Startdate, Enddate, Name_NC_LU, Name_NC_Total_Supply_GW, Name_NC_Total_Supply_SW, Name_NC_Non_Consumed, Name_NC_ETblue, Name_NC_RecovableFlow_Return_GW, Name_NC_RecovableFlow_Return_SW, Name_NC_NonRecovableFlow_Return_GW, Name_NC_NonRecovableFlow_Return_SW)
+            # Calculate the non recovable flow and recovable flow by using Grey Water Footprint values
+            DataCube_NonRecovableFlow, Datacube_RecovableFlow = Four.SplitNonConsumed_NonRecov.GWF_Based(nc_outname, Startdate_part, Enddate_part)
 
-    ############################ Create Sheet 4 ############################### 
+            # Get the data of Evaporation and save as nc
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_NonRecovableFlow, "Non_Recovable_Flow", "mm/month", 0.01)
+            DC.Add_NC_Array_Variable(nc_outname, Datacube_RecovableFlow, "Recovable_Flow", "mm/month", 0.01)
+            del DataCube_NonRecovableFlow, Datacube_RecovableFlow
+
+        #____________Apply fractions to calculate the non recovarable SW/GW and recovarable SW/GW ____________
+
+        # 1. Non recovarable flow
+        if not ("Non_Recovable_Flow_Ground_Water" in Variables_NC or "Non_Recovable_Flow_Surface_Water" in Variables_NC):
+
+            # Calculate the non recovable return flow to ground and surface water
+            DataCube_NonRecovableFlow_Return_GW, Datacube_NonRecovableFlow_Return_SW = Four.SplitGW_SW_Return.Fraction_Based(nc_outname, "Non_Recovable_Flow", Startdate_part, Enddate_part)
+
+            # Get the data of Evaporation and save as nc
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_NonRecovableFlow_Return_GW, "Non_Recovable_Flow_Ground_Water", "mm/month", 0.01)
+            DC.Add_NC_Array_Variable(nc_outname, Datacube_NonRecovableFlow_Return_SW, "Non_Recovable_Flow_Surface_Water", "mm/month", 0.01)
+            del DataCube_NonRecovableFlow_Return_GW, Datacube_NonRecovableFlow_Return_SW
+
+        # 2. Recovarable flow
+        if not ("Recovable_Flow_Ground_Water" in Variables_NC or "Recovable_Flow_Surface_Water" in Variables_NC):
+
+            # Calculate the non recovable return flow to ground and surface water
+            DataCube_RecovableFlow_Return_GW, Datacube_RecovableFlow_Return_SW = Four.SplitGW_SW_Return.Fraction_Based(nc_outname, "Recovable_Flow", Startdate_part, Enddate_part)
+
+            # Get the data of Evaporation and save as nc
+            DC.Add_NC_Array_Variable(nc_outname, DataCube_RecovableFlow_Return_GW, "Recovable_Flow_Ground_Water", "mm/month", 0.01)
+            DC.Add_NC_Array_Variable(nc_outname, Datacube_RecovableFlow_Return_SW, "Recovable_Flow_Surface_Water", "mm/month", 0.01)
+            del DataCube_RecovableFlow_Return_GW, Datacube_RecovableFlow_Return_SW
+
+        ############################ Create CSV 4 #################################
+
+        Dir_Basin_CSV, Unit_front = Generate.CSV.Create(Dir_Basin, Simulation, Basin, Startdate_part, Enddate_part, nc_outname)
+
+    ############################ Create Sheet 4 ###############################
 
     Generate.PDF.Create(Dir_Basin, Basin, Simulation, Dir_Basin_CSV, Unit_front)
 

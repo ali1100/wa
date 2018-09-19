@@ -1,42 +1,97 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed May 03 13:33:58 2017
+Created on Mon Mar 12 15:26:44 2018
 
 @author: tih
 """
-def Calc_Regions(Name_NC_Basin_CR, input_JRC, sensitivity, Boundaries):
+def Run(input_nc, output_nc, input_JRC):
+
+    # Define names
+    #Name_py_Discharge_dict_CR2 = os.path.join(Dir_Basin, 'Simulations', 'Simulation_%d' %Simulation, 'Sheet_5', 'Discharge_dict_CR2_simulation%d.npy' %(Simulation))    
+    #Name_py_River_dict_CR2 = os.path.join(Dir_Basin, 'Simulations', 'Simulation_%d' %Simulation, 'Sheet_5', 'River_dict_CR2_simulation%d.npy' %(Simulation))
+    #Name_py_DEM_dict_CR2 = os.path.join(Dir_Basin, 'Simulations', 'Simulation_%d' %Simulation, 'Sheet_5', 'DEM_dict_CR2_simulation%d.npy' %(Simulation))    
+    #Name_py_Distance_dict_CR2 = os.path.join(Dir_Basin, 'Simulations', 'Simulation_%d' %Simulation, 'Sheet_5', 'Distance_dict_CR2_simulation%d.npy' %(Simulation))
+    
+    #if not (os.path.exists(Name_py_Discharge_dict_CR2) and os.path.exists(Name_py_River_dict_CR2) and os.path.exists(Name_py_DEM_dict_CR2) and os.path.exists(Name_py_Distance_dict_CR2)):      
+    # Copy dicts as starting adding reservoir
+    import wa.General.raster_conversions as RC
+    import numpy as np
+    from datetime import date
+    
+    Discharge_dict_CR2 = RC.Open_nc_dict(output_nc, "dischargedict_dynamic")
+    
+    DEM_dataset = RC.Open_nc_array(input_nc, "dem")  
+    time = RC.Open_nc_array(output_nc, "time")  
+    
+    Startdate = date.fromordinal(time[0])
+    Enddate = date.fromordinal(time[-1])
+    
+    # Define names for reservoirs calculations
+    #Name_py_Diff_Water_Volume =  os.path.join(Dir_Basin,'Simulations','Simulation_%d' %Simulation, 'Sheet_5','Diff_Water_Volume_CR2_simulation%d.npy' %(Simulation))
+    #Name_py_Regions =  os.path.join(Dir_Basin,'Simulations','Simulation_%d' %Simulation, 'Sheet_5','Regions_simulation%d.npy' %(Simulation))
+
+    geo_out, proj, size_X, size_Y = RC.Open_array_info(input_JRC)  
+    
+    Boundaries = dict()
+    Boundaries['Lonmin'] = geo_out[0]
+    Boundaries['Lonmax'] = geo_out[0] + size_X * geo_out[1]
+    Boundaries['Latmin'] = geo_out[3] + size_Y * geo_out[5]
+    Boundaries['Latmax'] = geo_out[3]
+              
+    Regions = Calc_Regions(input_nc, output_nc, input_JRC, Boundaries)
+
+    Amount_months = len(Discharge_dict_CR2[0])
+
+    Diff_Water_Volume = np.zeros([len(Regions), Amount_months, 3])
+    reservoir=0
+
+    for region in Regions:
+
+        popt = Find_Area_Volume_Relation(region, input_JRC, input_nc)
+
+        Area_Reservoir_Values = GEE_calc_reservoir_area(region, Startdate, Enddate)
+
+        Diff_Water_Volume[reservoir,:,:] = Calc_Diff_Storage(Area_Reservoir_Values, popt)
+        reservoir+=1
+
+    ################# 7.3 Add storage reservoirs and change outflows ##################
+    Discharge_dict_CR2, River_dict_CR2, DEM_dict_CR2, Distance_dict_CR2 = Add_Reservoirs(output_nc, Diff_Water_Volume, Regions)       
+    return(Discharge_dict_CR2, River_dict_CR2, DEM_dict_CR2, Distance_dict_CR2)
+    
+def Calc_Regions(input_nc, output_nc, input_JRC, Boundaries):
 
     import numpy as np
-
     import wa.General.raster_conversions as RC
 
-    # Get JRC array and information
-    Array = RC.Open_tiff_array(input_JRC)
-    Geo_out, proj, size_X, size_Y = RC.Open_array_info(input_JRC)
+    sensitivity = 700 # 900 is less sensitive 1 is very sensitive
 
+    # Get JRC array and information
+    Array_JRC_occ = RC.Open_tiff_array(input_JRC)
+    Geo_out, proj, size_X, size_Y = RC.Open_array_info(input_JRC)
+    
     # Get Basin boundary based on LU
-    Array_LU = RC.Open_nc_array(Name_NC_Basin_CR)
-    LU_array=RC.resize_array_example(Array_LU,Array)
+    Array_LU = RC.Open_nc_array(input_nc, "basin")
+    LU_array=RC.resize_array_example(Array_LU,Array_JRC_occ)
     basin_array = np.zeros(np.shape(LU_array))
     basin_array[LU_array>0] = 1
     del LU_array
 
     # find all pixels with water occurence
-    Array[basin_array<1]=0
-    Array[Array<30] = 0     
-    Array[Array>=30] = 1    
+    Array_JRC_occ[basin_array<1]=0
+    Array_JRC_occ[Array_JRC_occ<30] = 0     
+    Array_JRC_occ[Array_JRC_occ>=30] = 1    
     del basin_array
 
     # sum larger areas to find lakes
-    x_size=np.round(int(np.shape(Array)[0])/30)
-    y_size=np.round(int(np.shape(Array)[1])/30)
+    x_size=np.round(int(np.shape(Array_JRC_occ)[0])/30)
+    y_size=np.round(int(np.shape(Array_JRC_occ)[1])/30)
     sum_array = np.zeros([x_size, y_size])
 
     for i in range(0,len(sum_array)):
         for j in range(0,len(sum_array[1])):
-            sum_array[i,j]=np.sum(Array[i*30:(i+1)*30,j*30:(j+1)*30])
+            sum_array[i,j]=np.sum(Array_JRC_occ[i*30:(i+1)*30,j*30:(j+1)*30])
 
-    del Array
+    del Array_JRC_occ
         
     lakes = np.argwhere(sum_array>=sensitivity)
     lake_info = np.zeros([1,4])
@@ -105,7 +160,7 @@ def Calc_Regions(Name_NC_Basin_CR, input_JRC, sensitivity, Boundaries):
 
 
 
-def Find_Area_Volume_Relation(region, input_JRC, DEM_dataset):
+def Find_Area_Volume_Relation(region, input_JRC, input_nc):
   
     # Find relation between V and A    
     
@@ -144,12 +199,15 @@ def Find_Area_Volume_Relation(region, input_JRC, DEM_dataset):
     del Array
     
     # Open DEM and reproject   
+    DEM_Array = RC.Open_nc_array(input_nc, "dem" )
+    Geo_out_dem, proj_dem, size_X_dem, size_Y_dem, size_Z_dem, time = RC.Open_nc_info(input_nc)
     
     # Save Example as memory file
     dest_example = DC.Save_as_MEM(Water_array, Geo_out, projection='WGS84')   
+    dest_dem = DC.Save_as_MEM(DEM_Array, Geo_out_dem, projection='WGS84')   
 
     # reproject DEM by using example
-    dest_out=RC.reproject_dataset_example(DEM_dataset, dest_example, method=2)
+    dest_out=RC.reproject_dataset_example(dest_dem, dest_example, method=2)
     DEM=dest_out.GetRasterBand(1).ReadAsArray()
         
     # find DEM water heights
@@ -407,21 +465,24 @@ def Calc_Diff_Storage(Area_Reservoir_Values, popt):
     return(Diff_Water_Volume)
          
 
-def Add_Reservoirs(Name_NC_Rivers ,Name_NC_Acc_Pixels, Diff_Water_Volume, River_dict, Discharge_dict, DEM_dict, Distance_dict, Regions, Example_dataset):
+def Add_Reservoirs(output_nc, Diff_Water_Volume, Regions):
  
     import numpy as np
     
     import wa.General.raster_conversions as RC
     import wa.General.data_conversions as DC
-    
-    # Extract Rivers data from NetCDF file
-    Rivers = RC.Open_nc_array(Name_NC_Rivers)
+
+    # Extract data from NetCDF file
+    Discharge_dict = RC.Open_nc_dict(output_nc, "dischargedict_dynamic")    
+    River_dict = RC.Open_nc_dict(output_nc, "riverdict_static")
+    DEM_dict = RC.Open_nc_dict(output_nc, "demdict_static")
+    Distance_dict = RC.Open_nc_dict(output_nc, "distancedict_static")
+    Rivers = RC.Open_nc_array(output_nc, "rivers")
+    acc_pixels = RC.Open_nc_array(output_nc, "accpix")
+
 
     # Open data array info based on example data
-    geo_out, epsg, size_X, size_Y = RC.Open_array_info(Example_dataset)
-
-    # Extract flow direction data from NetCDF file
-    acc_pixels = RC.Open_nc_array(Name_NC_Acc_Pixels)
+    geo_out, epsg, size_X, size_Y, size_Z, time = RC.Open_nc_info(output_nc)
 
     # Create ID Matrix
     y,x = np.indices((size_Y, size_X))
@@ -445,7 +506,6 @@ def Add_Reservoirs(Name_NC_Rivers ,Name_NC_Acc_Pixels, Diff_Water_Volume, River_
         dest = DC.Save_as_MEM(ID_Rivers, geo_out, projection='WGS84')   
         Rivers_ID_reservoir, Geo_out = RC.clip_data(dest,latlim=[region[2],region[3]],lonlim =[region[0],region[1]])  
 
-
         size_Y_reservoir, size_X_reservoir = np.shape(Rivers_Acc_Pixels_reservoir)
         IDs_Edges = []
         IDs_Edges = np.append(IDs_Edges,Rivers_Acc_Pixels_reservoir[0,:])
@@ -462,7 +522,7 @@ def Add_Reservoirs(Name_NC_Rivers ,Name_NC_Acc_Pixels, Diff_Water_Volume, River_
             if len(np.argwhere(River_part[1] == ID_reservoir)) > 0:
                  Reservoir_is_in_River[reservoir, 0] = np.argwhere(River_part[1] == ID_reservoir) #River_part_good
                  Reservoir_is_in_River[reservoir, 1] = River_part[0]  #River_Add_Reservoir
-                 Reservoir_is_in_River[reservoir, 2] = 1           #Reservoir_is_in_River
+                 Reservoir_is_in_River[reservoir, 2] = 1              #Reservoir_is_in_River
  
     
     numbers = abs(Reservoir_is_in_River[:,1].argsort() - len(Reservoir_is_in_River)+1)
@@ -519,4 +579,4 @@ def Add_Reservoirs(Name_NC_Rivers ,Name_NC_Acc_Pixels, Diff_Water_Volume, River_
                        times = 0
                    times += 1    
                                     
-    return(Discharge_dict, River_dict, DEM_dict, Distance_dict)    
+    return(Discharge_dict, River_dict, DEM_dict, Distance_dict)        

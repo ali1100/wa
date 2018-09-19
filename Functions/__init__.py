@@ -13,8 +13,8 @@ This data is used within a water accounting framework.
 """
 
 
-from wa.Functions import Five, Four, Start, Two
+from wa.Functions import Five, Four, Start, Two, Three
 
-__all__ = ['Five', 'Four', 'Start', 'Two']
+__all__ = ['Five', 'Four', 'Start', 'Two', 'Three']
 
 __version__ = '0.1'

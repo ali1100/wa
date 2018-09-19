@@ -8,6 +8,7 @@ Module: Sheets/sheet1
 """
 
 import os
+import time
 import pandas as pd
 import xml.etree.ElementTree as ET
 import subprocess
@@ -338,15 +339,20 @@ def create_sheet1(basin, period, units, data, output, template=False):
 #    img_out.format = 'jpg'
 #    img_out.save(filename=output)
     
-        # Get the paths based on the environment variable
-    WA_env_paths = os.environ["WA_PATHS"].split(';')
-    Inkscape_env_path = WA_env_paths[1]
-    Path_Inkscape = os.path.join(Inkscape_env_path,'inkscape.exe')
+    # Get the paths based on the environment variable
+    if os.name == 'posix':
+        Path_Inkscape = 'inkscape'
+        
+    else:
+        WA_env_paths = os.environ["WA_PATHS"].split(';')
+        Inkscape_env_path = WA_env_paths[1]
+        Path_Inkscape = os.path.join(Inkscape_env_path,'inkscape.exe')
 
     # Export svg to png
     tempout_path = output.replace('.pdf', '_temporary.svg')
     tree.write(tempout_path)
     subprocess.call([Path_Inkscape,tempout_path,'--export-pdf='+output, '-d 300'])
+    time.sleep(10)
     os.remove(tempout_path)
 
     # Return
