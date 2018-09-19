@@ -30,7 +30,37 @@ def Download_data(Date, Version, output_folder, Var):
     try:
          # download the file when it not exist					
         local_filename = os.path.join(output_folder, filename)
-        if not os.path.exists(local_filename):
+        if os.path.exists(local_filename):
+            Downloaded = 0
+            Times = 0
+            while Downloaded == 0:				
+                # Create the command and run the command in cmd
+                if Version == 1:
+                    FTP_name = 'https://nomads.ncdc.noaa.gov/data/cfsr/' + Date.strftime('%Y') + Date.strftime('%m')+ '/' + filename
+    							
+                if Version == 2:
+                    FTP_name = 'https://nomads.ncdc.noaa.gov/modeldata/cfsv2_analysis_timeseries/' + Date.strftime('%Y') + '/' + Date.strftime('%Y') + Date.strftime('%m')+ '/' + filename
+    		# Resume download if it's been interrupted
+                curl = pycurl.Curl()
+                curl.setopt(pycurl.URL, FTP_name)
+                curl.setopt(pycurl.FOLLOWLOCATION, 1)
+                curl.setopt(pycurl.MAXREDIRS, 5)
+                fp = open(local_filename, "ab")
+                curl.setopt(pycurl.SSL_VERIFYPEER, 0)
+                curl.setopt(pycurl.SSL_VERIFYHOST, 0)
+                curl.setopt(pycurl.RESUME_FROM, os.path.getsize(local_filename))
+                curl.setopt(pycurl.WRITEDATA, fp)
+                curl.perform()
+                curl.close()
+                fp.close()	
+                statinfo = os.stat(local_filename)		
+                if int(statinfo.st_size) > 10000:
+                    Downloaded = 1	
+                else:
+                    Times += 1
+                    if Times == 10:
+                        Downloaded = 1
+        else:
             Downloaded = 0
             Times = 0
             while Downloaded == 0:				
@@ -60,4 +90,4 @@ def Download_data(Date, Version, output_folder, Var):
     except:
         print 'Was not able to download the CFSR file from the FTP server'
     
-    return(local_filename)   
+    return(local_filename)  
