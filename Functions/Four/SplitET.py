@@ -72,7 +72,7 @@ def Blue_Green(Dir_Basin, nc_outname, ETref_Product, P_Product, Startdate, Endda
 
     ######################## Extract Precipitation data ########################
 
-    if (P_Product == "CHIRPS" or P_Product == "RFE"):
+    if (P_Product == "CHIRPS" or P_Product == "RFE" or P_Product == "TRMM"):
         # Define data path
         Data_Path_P = os.path.join(Dir_Basin, 'Precipitation', P_Product, 'Monthly')
     else:
